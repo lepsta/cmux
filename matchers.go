@@ -154,6 +154,14 @@ func HTTP2HeaderField(name, value string) Matcher {
 	}
 }
 
+// HTTP2HeaderFieldMatcher accepts a matcher function that will receive the 
+// value of a specified header field.
+func HTTP2HeaderFieldMatcher(name string, matcher func(gotValue string) bool) MatchWriter {
+	return func(w io.Writer, r io.Reader) bool {
+		return matchHTTP2Field(w, r, name, matcher)
+	}
+}
+
 // HTTP2HeaderFieldPrefix returns a matcher matching the header fields of the
 // first headers frame. If the header with key name has a value prefixed with
 // valuePrefix, this will match.
