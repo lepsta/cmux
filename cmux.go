@@ -107,7 +107,7 @@ type CMux interface {
 
 type matchersListener struct {
 	ss []MatchWriter
-	l  muxListener
+	l  *muxListener
 }
 
 type cMux struct {
@@ -137,10 +137,21 @@ func (m *cMux) Match(matchers ...Matcher) net.Listener {
 }
 
 func (m *cMux) MatchWithWriters(matchers ...MatchWriter) net.Listener {
-	ml := muxListener{
+	ml := &muxListener{
 		Listener: m.root,
 		connc:    make(chan net.Conn, m.bufLen),
 		donec:    make(chan struct{}),
+	}
+	m.sls = append(m.sls, matchersListener{ss: matchers, l: ml})
+	return ml
+}
+
+func (m *cMux) ExactMatchWithWriters(matchers ...MatchWriter) net.Listener {
+	ml := &muxListener{
+		Listener: m.root,
+		connc:    make(chan net.Conn, m.bufLen),
+		donec:    make(chan struct{}),
+		exact:    true,
 	}
 	m.sls = append(m.sls, matchersListener{ss: matchers, l: ml})
 	return ml
@@ -158,11 +169,7 @@ func (m *cMux) Serve() error {
 		wg.Wait()
 
 		for _, sl := range m.sls {
-			close(sl.l.connc)
-			// Drain the connections enqueued for the listener.
-			for c := range sl.l.connc {
-				_ = c.Close()
-			}
+			sl.l.Close()
 		}
 	}()
 
@@ -180,6 +187,24 @@ func (m *cMux) Serve() error {
 	}
 }
 
+func (m *cMux) matched(muc *MuxConn, sl matchersListener) bool {
+	total := len(sl.ss)
+	numMatched := 0
+
+	for _, s := range sl.ss {
+		matched := s(muc.Conn, muc.startSniffing())
+		muc.doneSniffing()
+		if matched && !sl.l.exact {
+			return true
+		}
+		if matched {
+			numMatched++
+		}
+	}
+
+	return total == numMatched
+}
+
 func (m *cMux) serve(c net.Conn, donec <-chan struct{}, wg *sync.WaitGroup) {
 	defer wg.Done()
 
@@ -187,21 +212,26 @@ func (m *cMux) serve(c net.Conn, donec <-chan struct{}, wg *sync.WaitGroup) {
 	if m.readTimeout > noTimeout {
 		_ = c.SetReadDeadline(time.Now().Add(m.readTimeout))
 	}
+
 	for _, sl := range m.sls {
-		for _, s := range sl.ss {
-			matched := s(muc.Conn, muc.startSniffing())
-			if matched {
-				muc.doneSniffing()
-				if m.readTimeout > noTimeout {
-					_ = c.SetReadDeadline(time.Time{})
-				}
-				select {
-				case sl.l.connc <- muc:
-				case <-donec:
-					_ = c.Close()
-				}
-				return
+		matched := m.matched(muc, sl)
+		if matched {
+			if m.readTimeout > noTimeout {
+				_ = c.SetReadDeadline(time.Time{})
 			}
+
+			if sl.l.closed {
+				// Todo: we should remove it and retry to match a different
+				// listener.
+				continue
+			}
+
+			select {
+			case sl.l.connc <- muc:
+			case <-donec:
+				_ = c.Close()
+			}
+			return
 		}
 	}
 
@@ -254,11 +284,13 @@ func (m *cMux) handleErr(err error) bool {
 
 type muxListener struct {
 	net.Listener
-	connc chan net.Conn
-	donec chan struct{}
+	connc  chan net.Conn
+	donec  chan struct{}
+	exact  bool
+	closed bool
 }
 
-func (l muxListener) Accept() (net.Conn, error) {
+func (l *muxListener) Accept() (net.Conn, error) {
 	select {
 	case c, ok := <-l.connc:
 		if !ok {
@@ -268,6 +300,16 @@ func (l muxListener) Accept() (net.Conn, error) {
 	case <-l.donec:
 		return nil, ErrServerClosed
 	}
+}
+
+func (l *muxListener) Close() error {
+	close(l.connc)
+	l.closed = true
+	// Drain the connections enqueued for the listener.
+	for c := range l.connc {
+		_ = c.Close()
+	}
+	return nil
 }
 
 // MuxConn wraps a net.Conn and provides transparent sniffing of connection data.
