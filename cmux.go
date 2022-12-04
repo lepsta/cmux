@@ -94,6 +94,12 @@ type CMux interface {
 	//
 	// The order used to call Match determines the priority of matchers.
 	MatchWithWriters(...MatchWriter) net.Listener
+	// ExactMatchWithWriters returns a net.Listener that accepts only the
+	// connections that matched by ALL the matcher writers.
+	//
+	// Prefer Matchers over MatchWriters, since the latter can write on the
+	// connection before the actual handler.
+	ExactMatchWithWriters(...MatchWriter) net.Listener
 	// Serve starts multiplexing the listener. Serve blocks and perhaps
 	// should be invoked concurrently within a go routine.
 	Serve() error
